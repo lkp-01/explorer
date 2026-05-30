@@ -1,0 +1,4 @@
+openai
+httpx
+pydantic>=2
+python-dotenv

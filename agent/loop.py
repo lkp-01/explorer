@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
-
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
 
 from agent.messages import (
     assistant_message_to_dict,
@@ -19,43 +15,13 @@ from agent.messages import (
 from agent.prompts import SYSTEM_PROMPT
 from agent.state import AgentState
 from agent.state_sync import sync_state_from_tool_result
+from config import config
+from guardrails.input_filter import check_input
+from guardrails.output_filter import clean_output
+from models.client import LLMClient
 from tools.registry import dispatch, get_openai_tools
 
-import tools.places  # noqa: F401 触发工具注册
-import tools.weather  # noqa: F401 触发工具注册
-
 logger = logging.getLogger(__name__)
-load_dotenv()
-
-DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL_NAME = "deepseek-v4-pro"
-MAX_TOOL_TURNS = 8
-
-
-def _get_api_key() -> str | None:
-    """读取 DeepSeek 或通用 OpenAI 兼容 API Key。"""
-
-    return os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
-
-
-def _get_base_url() -> str:
-    """读取 OpenAI 兼容服务地址，默认指向 DeepSeek。"""
-
-    return (
-        os.getenv("DEEPSEEK_BASE_URL")
-        or os.getenv("OPENAI_BASE_URL")
-        or DEFAULT_BASE_URL
-    )
-
-
-def _get_model_name() -> str:
-    """读取模型名，默认使用 DeepSeek 当前 OpenAI 兼容模型。"""
-
-    return (
-        os.getenv("DEEPSEEK_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or DEFAULT_MODEL_NAME
-    )
 
 
 def _parse_tool_arguments(arguments_json: str) -> dict[str, Any]:
@@ -91,32 +57,34 @@ def _non_retryable_tool_reply(tool_name: str, result_json: str) -> str | None:
     return None
 
 
-async def run_turn(state: AgentState, user_message: str) -> tuple[str, AgentState]:
-    """执行一轮用户消息处理，返回助手回复和更新后的状态。"""
+async def run_turn(
+    client: LLMClient,
+    state: AgentState,
+    user_message: str,
+) -> tuple[str, AgentState]:
+    """执行一轮用户消息处理，返回助手回复和更新后的状态。
+
+    client 由调用方（main）构造一次后注入，循环本身不关心 provider 细节。
+    输入先过护栏，输出再过护栏——一进一出守住 agent 与外界的边界。
+    """
 
     updated_state = state.model_copy(deep=True)
-    messages = build_messages(state, user_message, SYSTEM_PROMPT)
-    api_key = _get_api_key()
 
-    if not api_key:
-        reply = "DeepSeek API key 未配置，请先在环境变量或 .env 中设置 DEEPSEEK_API_KEY。"
+    # —— 输入护栏：异常输入直接拦下，不进入昂贵的模型调用 ——
+    checked = check_input(user_message)
+    if not checked.ok:
         updated_state.add_message("user", user_message)
-        updated_state.add_message("assistant", reply)
-        return reply, updated_state
+        updated_state.add_message("assistant", checked.message)
+        return checked.message, updated_state
+    user_message = checked.message
 
-    client = AsyncOpenAI(api_key=api_key, base_url=_get_base_url())
-    model_name = _get_model_name()
+    messages = build_messages(state, user_message, SYSTEM_PROMPT)
     tools = get_openai_tools()
     final_reply = ""
 
     try:
-        for turn_index in range(MAX_TOOL_TURNS):
-            response = await client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                tools=tools,
-                max_tokens=1200,
-            )
+        for turn_index in range(config.max_tool_turns):
+            response = await client.chat(messages, tools)
 
             assistant_message = response.choices[0].message
             tool_calls = extract_tool_calls(assistant_message)
@@ -124,7 +92,7 @@ async def run_turn(state: AgentState, user_message: str) -> tuple[str, AgentStat
             logger.info(
                 "model_turn turn=%s model=%s tool_calls=%s content=%s",
                 turn_index + 1,
-                model_name,
+                client.model,
                 len(tool_calls),
                 assistant_text,
             )
@@ -180,8 +148,8 @@ async def run_turn(state: AgentState, user_message: str) -> tuple[str, AgentStat
         logger.exception("Agent 循环执行失败")
         final_reply = "我这边暂时无法完成本轮推荐，请稍后再试或检查 API 配置。"
 
-    if not final_reply:
-        final_reply = "我现在还没能整理出明确建议，请你补充想去的地点类型、位置或时间。"
+    # —— 输出护栏：兜底空回复、拦截内部信息泄露、截断超长 ——
+    final_reply = clean_output(final_reply)
 
     updated_state.add_message("user", user_message)
     updated_state.add_message("assistant", final_reply)

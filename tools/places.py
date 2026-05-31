@@ -1,16 +1,15 @@
 """封装腾讯位置服务周边地点搜索工具。"""
 
 import logging
-import os
 from typing import Any
 
 import httpx
-from dotenv import load_dotenv
 
+from config import config
 from tools.registry import register_tool
+from utils.parser import clean_text, float_or_zero
 
 logger = logging.getLogger(__name__)
-load_dotenv()
 
 TENCENT_PLACE_SEARCH_URL = "https://apis.map.qq.com/ws/place/v1/search"
 TENCENT_DAILY_LIMIT_STATUS = 121
@@ -27,8 +26,8 @@ CATEGORY_KEYWORDS: dict[str, str] = {
 PLACES_TOOL_DESCRIPTION = """
 搜索指定经纬度附近的城市漫步地点，最多返回 10 个结果。
 category 可选值为 restaurant、cafe、park、shopping、attraction、bar。
-radius 单位是米，默认 800，最大 1000；如果用户说“走路 10 分钟内”，请设置为约 800。
-keyword 用于细化搜索，比如“拉面”“咖啡”“书店”。返回结果包含地点 ID、名称、类别、距离、简介和地址。
+radius 单位是米，默认 800，最大 1000；如果用户说"走路 10 分钟内"，请设置为约 800。
+keyword 用于细化搜索，比如"拉面""咖啡""书店"。返回结果包含地点 ID、名称、类别、距离、简介和地址。
 """.strip()
 
 PLACES_TOOL_PARAMETERS: dict[str, Any] = {
@@ -58,23 +57,6 @@ PLACES_TOOL_PARAMETERS: dict[str, Any] = {
 }
 
 
-def _float_or_zero(value: object) -> float:
-    """把接口返回的距离转换为 float，失败时返回 0。"""
-
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _text(value: object) -> str:
-    """把腾讯接口中可能出现的空数组或空值转换为文本。"""
-
-    if value in (None, "", "[]") or isinstance(value, list):
-        return ""
-    return str(value)
-
-
 @register_tool(
     name="search_places",
     description=PLACES_TOOL_DESCRIPTION,
@@ -89,7 +71,7 @@ async def search_places(
 ) -> list[dict[str, object]] | dict[str, object]:
     """根据经纬度、类别和关键词搜索附近地点，失败时返回结构化错误。"""
 
-    api_key = os.getenv("TENCENT_MAP_KEY")
+    api_key = config.tencent_map_key
     if not api_key:
         logger.warning("TENCENT_MAP_KEY 未配置，地点工具返回降级结果")
         return {
@@ -125,11 +107,7 @@ async def search_places(
         status = int(payload.get("status") or 0)
         if status != 0:
             message = str(payload.get("message") or "腾讯周边搜索暂时不可用")
-            logger.warning(
-                "腾讯周边搜索失败 status=%s message=%s",
-                status,
-                message,
-            )
+            logger.warning("腾讯周边搜索失败 status=%s message=%s", status, message)
             user_message = (
                 "腾讯位置服务今日查询额度已用完"
                 if status == TENCENT_DAILY_LIMIT_STATUS
@@ -146,20 +124,20 @@ async def search_places(
 
         results: list[dict[str, object]] = []
         for poi in payload.get("data") or []:
-            name = _text(poi.get("title"))
+            name = clean_text(poi.get("title"))
             if not name:
                 continue
 
-            address = _text(poi.get("address"))
-            poi_category = _text(poi.get("category"))
+            address = clean_text(poi.get("address"))
+            poi_category = clean_text(poi.get("category"))
             brief = address or poi_category or "暂无简介"
 
             results.append(
                 {
-                    "place_id": _text(poi.get("id")),
+                    "place_id": clean_text(poi.get("id")),
                     "name": name,
                     "category": category,
-                    "distance_meters": _float_or_zero(poi.get("_distance")),
+                    "distance_meters": float_or_zero(poi.get("_distance")),
                     "rating": None,
                     "brief": brief,
                     "address": address,

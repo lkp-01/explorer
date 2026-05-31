@@ -1,18 +1,15 @@
 """封装和风天气实时天气查询工具。"""
 
 import logging
-import os
 from typing import Any
 
 import httpx
-from dotenv import load_dotenv
 
+from config import config
 from tools.registry import register_tool
 
 logger = logging.getLogger(__name__)
-load_dotenv()
 
-DEFAULT_QWEATHER_API_HOST = "devapi.qweather.com"
 QWEATHER_NOW_PATH = "/v7/weather/now"
 
 WEATHER_TOOL_DESCRIPTION = """
@@ -38,9 +35,9 @@ WEATHER_FALLBACK: dict[str, object] = {
 
 
 def _get_weather_url() -> str:
-    """根据 .env 中的 QWEATHER_API_HOST 生成实时天气接口地址。"""
+    """根据 config 中的 QWEATHER_API_HOST 生成实时天气接口地址。"""
 
-    host = os.getenv("QWEATHER_API_HOST") or DEFAULT_QWEATHER_API_HOST
+    host = config.qweather_api_host
     host = host.strip().removeprefix("https://").removeprefix("http://").rstrip("/")
     return f"https://{host}{QWEATHER_NOW_PATH}"
 
@@ -53,7 +50,7 @@ def _get_weather_url() -> str:
 async def get_weather(lat: float, lng: float) -> dict[str, object]:
     """根据经纬度查询实时天气，失败时返回友好的降级结果。"""
 
-    api_key = os.getenv("QWEATHER_API_KEY")
+    api_key = config.qweather_api_key
     if not api_key:
         logger.warning("QWEATHER_API_KEY 未配置，天气工具返回降级结果")
         return WEATHER_FALLBACK.copy()

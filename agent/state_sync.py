@@ -64,7 +64,7 @@ def _sync_candidates_state(
 
         place_id = str(item.get("place_id") or "")
         name = str(item.get("name") or "")
-        if not place_id or not name or place_id in state.rejected_candidates:
+        if not place_id or not name:
             continue
 
         try:

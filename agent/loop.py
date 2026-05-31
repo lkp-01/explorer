@@ -74,6 +74,23 @@ def _parse_tool_arguments(arguments_json: str) -> dict[str, Any]:
     return arguments
 
 
+def _non_retryable_tool_reply(tool_name: str, result_json: str) -> str | None:
+    """把不可重试的工具错误转换为直接回复，避免模型重复调用。"""
+
+    try:
+        payload = json.loads(result_json)
+    except json.JSONDecodeError:
+        return None
+
+    if tool_name != "search_places" or not isinstance(payload, dict):
+        return None
+
+    if payload.get("provider") == "tencent" and not payload.get("retryable", True):
+        return str(payload.get("error") or "腾讯位置服务暂时不可用，请检查 TENCENT_MAP_KEY。")
+
+    return None
+
+
 async def run_turn(state: AgentState, user_message: str) -> tuple[str, AgentState]:
     """执行一轮用户消息处理，返回助手回复和更新后的状态。"""
 
@@ -102,11 +119,19 @@ async def run_turn(state: AgentState, user_message: str) -> tuple[str, AgentStat
             )
 
             assistant_message = response.choices[0].message
-            messages.append(assistant_message_to_dict(assistant_message))
             tool_calls = extract_tool_calls(assistant_message)
+            assistant_text = extract_text(assistant_message)
+            logger.info(
+                "model_turn turn=%s model=%s tool_calls=%s content=%s",
+                turn_index + 1,
+                model_name,
+                len(tool_calls),
+                assistant_text,
+            )
+            messages.append(assistant_message_to_dict(assistant_message))
 
             if not tool_calls:
-                final_reply = extract_text(assistant_message)
+                final_reply = assistant_text
                 break
 
             for tool_call in tool_calls:
@@ -118,7 +143,7 @@ async def run_turn(state: AgentState, user_message: str) -> tuple[str, AgentStat
                     "tool_call turn=%s name=%s arguments=%s",
                     turn_index + 1,
                     tool_name,
-                    arguments,
+                    json.dumps(arguments, ensure_ascii=False, default=str),
                 )
                 result_json = await dispatch(tool_name, arguments)
                 logger.info(
@@ -141,6 +166,11 @@ async def run_turn(state: AgentState, user_message: str) -> tuple[str, AgentStat
                         "content": result_json,
                     }
                 )
+                final_reply = _non_retryable_tool_reply(tool_name, result_json) or ""
+                if final_reply:
+                    break
+            if final_reply:
+                break
         else:
             final_reply = (
                 "我连续调用工具的次数太多了，先停一下。"

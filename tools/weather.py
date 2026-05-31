@@ -12,7 +12,8 @@ from tools.registry import register_tool
 logger = logging.getLogger(__name__)
 load_dotenv()
 
-QWEATHER_NOW_URL = "https://devapi.qweather.com/v7/weather/now"
+DEFAULT_QWEATHER_API_HOST = "devapi.qweather.com"
+QWEATHER_NOW_PATH = "/v7/weather/now"
 
 WEATHER_TOOL_DESCRIPTION = """
 查询指定经纬度位置的实时天气。参数 lat 是纬度，lng 是经度。
@@ -36,6 +37,14 @@ WEATHER_FALLBACK: dict[str, object] = {
 }
 
 
+def _get_weather_url() -> str:
+    """根据 .env 中的 QWEATHER_API_HOST 生成实时天气接口地址。"""
+
+    host = os.getenv("QWEATHER_API_HOST") or DEFAULT_QWEATHER_API_HOST
+    host = host.strip().removeprefix("https://").removeprefix("http://").rstrip("/")
+    return f"https://{host}{QWEATHER_NOW_PATH}"
+
+
 @register_tool(
     name="get_weather",
     description=WEATHER_TOOL_DESCRIPTION,
@@ -52,7 +61,7 @@ async def get_weather(lat: float, lng: float) -> dict[str, object]:
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                QWEATHER_NOW_URL,
+                _get_weather_url(),
                 params={"location": f"{lng},{lat}", "key": api_key},
             )
             response.raise_for_status()
@@ -69,6 +78,15 @@ async def get_weather(lat: float, lng: float) -> dict[str, object]:
             "humidity": int(now["humidity"]) if now.get("humidity") else None,
             "wind_speed": float(now["windSpeed"]),
         }
-    except Exception:
-        logger.warning("天气服务暂时不可用", exc_info=True)
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "天气服务暂时不可用，HTTP 状态码：%s",
+            exc.response.status_code,
+        )
+        return WEATHER_FALLBACK.copy()
+    except httpx.RequestError as exc:
+        logger.warning("天气服务请求失败：%s", exc.__class__.__name__)
+        return WEATHER_FALLBACK.copy()
+    except Exception as exc:
+        logger.warning("天气服务暂时不可用：%s", exc.__class__.__name__)
         return WEATHER_FALLBACK.copy()

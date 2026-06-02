@@ -12,7 +12,8 @@ from agent.messages import (
     extract_text,
     extract_tool_calls,
 )
-from agent.prompts import SYSTEM_PROMPT
+from agent.prompts import build_system_prompt
+from agent.router import Intent, classify
 from agent.state import AgentState
 from agent.state_sync import sync_state_from_tool_result
 from config import config
@@ -78,72 +79,81 @@ async def run_turn(
         return checked.message, updated_state
     user_message = checked.message
 
-    messages = build_messages(state, user_message, SYSTEM_PROMPT)
+    # —— 意图分流（阶段一）：先判断这句话该走哪条路径，再决定用哪套 prompt、是否进工具循环 ——
+    intent = await classify(client, user_message)
+    system_prompt = build_system_prompt(intent)
+
+    messages = build_messages(state, user_message, system_prompt)
     tools = get_openai_tools()
     final_reply = ""
 
     try:
-        for turn_index in range(config.max_tool_turns):
-            response = await client.chat(messages, tools)
+        # —— 闲聊路径：只回一句，不进工具循环。调用 chat 时不传 tools，模型就不会去调天气/地点工具 ——
+        if intent is Intent.CHITCHAT:
+            response = await client.chat(messages)
+            final_reply = extract_text(response.choices[0].message)
+        else:
+            for turn_index in range(config.max_tool_turns):
+                response = await client.chat(messages, tools)
 
-            assistant_message = response.choices[0].message
-            tool_calls = extract_tool_calls(assistant_message)
-            assistant_text = extract_text(assistant_message)
-            logger.info(
-                "model_turn turn=%s model=%s tool_calls=%s content=%s",
-                turn_index + 1,
-                client.model,
-                len(tool_calls),
-                assistant_text,
-            )
-            messages.append(assistant_message_to_dict(assistant_message))
-
-            if not tool_calls:
-                final_reply = assistant_text
-                break
-
-            for tool_call in tool_calls:
-                function = tool_call.get("function") or {}
-                tool_name = str(function.get("name") or "")
-                arguments = _parse_tool_arguments(str(function.get("arguments") or "{}"))
-
+                assistant_message = response.choices[0].message
+                tool_calls = extract_tool_calls(assistant_message)
+                assistant_text = extract_text(assistant_message)
                 logger.info(
-                    "tool_call turn=%s name=%s arguments=%s",
+                    "model_turn turn=%s model=%s tool_calls=%s content=%s",
                     turn_index + 1,
-                    tool_name,
-                    json.dumps(arguments, ensure_ascii=False, default=str),
+                    client.model,
+                    len(tool_calls),
+                    assistant_text,
                 )
-                result_json = await dispatch(tool_name, arguments)
-                logger.info(
-                    "tool_result turn=%s name=%s result=%s",
-                    turn_index + 1,
-                    tool_name,
-                    result_json,
-                )
-                sync_state_from_tool_result(
-                    updated_state,
-                    tool_name,
-                    arguments,
-                    result_json,
-                )
+                messages.append(assistant_message_to_dict(assistant_message))
 
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": str(tool_call.get("id") or ""),
-                        "content": result_json,
-                    }
-                )
-                final_reply = _non_retryable_tool_reply(tool_name, result_json) or ""
+                if not tool_calls:
+                    final_reply = assistant_text
+                    break
+
+                for tool_call in tool_calls:
+                    function = tool_call.get("function") or {}
+                    tool_name = str(function.get("name") or "")
+                    arguments = _parse_tool_arguments(str(function.get("arguments") or "{}"))
+
+                    logger.info(
+                        "tool_call turn=%s name=%s arguments=%s",
+                        turn_index + 1,
+                        tool_name,
+                        json.dumps(arguments, ensure_ascii=False, default=str),
+                    )
+                    result_json = await dispatch(tool_name, arguments)
+                    logger.info(
+                        "tool_result turn=%s name=%s result=%s",
+                        turn_index + 1,
+                        tool_name,
+                        result_json,
+                    )
+                    sync_state_from_tool_result(
+                        updated_state,
+                        tool_name,
+                        arguments,
+                        result_json,
+                    )
+
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": str(tool_call.get("id") or ""),
+                            "content": result_json,
+                        }
+                    )
+                    final_reply = _non_retryable_tool_reply(tool_name, result_json) or ""
+                    if final_reply:
+                        break
                 if final_reply:
                     break
-            if final_reply:
-                break
-        else:
-            final_reply = (
-                "我连续调用工具的次数太多了，先停一下。"
-                "请你补充一个更具体的地点类型、时间范围或位置。"
-            )
+            else:
+                final_reply = (
+                    "我连续调用工具的次数太多了，先停一下。"
+                    "请你补充一个更具体的地点类型、时间范围或位置。"
+                )
     except Exception:
         logger.exception("Agent 循环执行失败")
         final_reply = "我这边暂时无法完成本轮推荐，请稍后再试或检查 API 配置。"

@@ -48,9 +48,16 @@ def _history_to_messages(state: AgentState) -> list[dict[str, Any]]:
 
 
 def _format_state_context(state: AgentState) -> str:
-    """把当前状态压缩为给 LLM 决策使用的上下文。"""
+    """把当前状态压缩为给 LLM 决策使用的上下文。
 
-    snapshot = state.model_dump(mode="json", exclude={"conversation_history"})
+    阶段三：preferences / session_feedback 不放进快照——它们已由 build_system_prompt
+    以更可控的措辞注入系统提示词，这里再带一遍只会重复、还可能让模型逐字复述。
+    """
+
+    snapshot = state.model_dump(
+        mode="json",
+        exclude={"conversation_history", "preferences", "session_feedback"},
+    )
     return (
         "当前状态快照（供你决策，不要逐字复述）：\n"
         f"{json.dumps(snapshot, ensure_ascii=False, default=str)}"

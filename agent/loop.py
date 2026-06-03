@@ -14,6 +14,7 @@ from agent.messages import (
 )
 from agent.planner import run_route_plan
 from agent.prompts import build_system_prompt
+from agent.reflexion import detect_veto
 from agent.router import Intent, classify
 from agent.state import AgentState
 from agent.state_sync import sync_state_from_tool_result
@@ -83,6 +84,15 @@ async def run_turn(
     # —— 意图分流（阶段一）：先判断这句话该走哪条路径，再决定用哪套 prompt、是否进工具循环 ——
     intent = await classify(client, user_message)
 
+    # —— Reflexion 反馈捕获（阶段三）：在有上一轮推荐、且本轮是推荐类意图时，
+    #    先看用户是不是在否决某个推荐。是就记一条会话级反馈，下面生成时由 prompt 注入规避。——
+    if intent in (Intent.SINGLE_SPOT, Intent.ROUTE_PLAN) and (
+        updated_state.candidates or updated_state.route_plan is not None
+    ):
+        veto = await detect_veto(client, updated_state, user_message)
+        if veto is not None:
+            updated_state.session_feedback.append(veto)
+
     # —— 路线规划（阶段二）：走独立的 Plan-and-Solve 路径，不进通用 ReAct 循环 ——
     if intent is Intent.ROUTE_PLAN:
         try:
@@ -96,7 +106,12 @@ async def run_turn(
         updated_state.add_message("assistant", final_reply)
         return final_reply, updated_state
 
-    system_prompt = build_system_prompt(intent)
+    # 阶段三：把长期偏好 + 本会话否决注入系统提示词，单点推荐生成时遵守
+    system_prompt = build_system_prompt(
+        intent,
+        preferences=updated_state.preferences,
+        session_feedback=updated_state.session_feedback,
+    )
 
     messages = build_messages(state, user_message, system_prompt)
     tools = get_openai_tools()

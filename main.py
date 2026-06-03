@@ -2,9 +2,11 @@ import asyncio
 
 import tools  # noqa: F401  导入工具包即完成所有工具注册
 from agent.loop import run_turn
+from agent.reflexion import distill_preferences
 from agent.state import AgentState, Location
 from config import config
 from memory.history import compact
+from memory.preference_store import PreferenceStore
 from memory.storage import SessionStore
 from models.client import build_client
 from utils.logger import configure_logging
@@ -25,6 +27,16 @@ def _read_location() -> Location:
         return Location(lat=DEFAULT_LAT, lng=DEFAULT_LNG)
 
 
+async def _finalize_preferences(client, state, pref_store: PreferenceStore) -> None:
+    """会话结束时提炼并保存长期偏好。失败只提示，不阻断退出。"""
+
+    try:
+        state.preferences = await distill_preferences(client, state)
+        pref_store.save(config.user_id, state.preferences)
+    except Exception:
+        print("（偏好沉淀失败，本次未更新长期偏好，不影响退出。）")
+
+
 async def main() -> None:
     configure_logging(config.log_level, config.log_file)
 
@@ -37,6 +49,7 @@ async def main() -> None:
         return
 
     store = SessionStore(config.session_dir)
+    pref_store = PreferenceStore(config.preference_dir)
 
     try:
         # 优先恢复上次会话；没有就新开一个，并在缺少位置时才询问
@@ -48,11 +61,16 @@ async def main() -> None:
         if state.location is None:
             state.location = _read_location()
 
+        # 阶段三：长期偏好独立于会话，从 PreferenceStore 按用户加载后注入 state
+        state.preferences = pref_store.load(config.user_id)
+
         print("城市漫步助手已启动。输入你想去的地方，输入 quit 或 exit 退出。")
         while True:
             try:
                 user_message = input("> ").strip()
                 if user_message.lower() in {"quit", "exit"}:
+                    # 阶段三：会话结束时把本会话否决提炼成长期偏好，单独落盘
+                    await _finalize_preferences(client, state, pref_store)
                     print("已退出。")
                     break
                 if not user_message:

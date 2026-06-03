@@ -1,7 +1,7 @@
 """Plan-and-Solve 路线规划（阶段二）：先成计划，再逐站执行。
 
 和现有 ReAct"走一步看一步"互补：
-- generate_plan：让 LLM 一次性产出**结构化路线计划**（JSON），这一步不调任何工具。
+- generate_plan：让 LLM 一次性产出结构化路线计划（JSON），这一步不调任何工具。
 - execute_plan：按计划逐站调用搜索工具，把每一站回填成真实地点，最后再让 LLM 合成回复。
 - run_route_plan：把上面两步串起来，并把成形的路线写回 state，供持久化与后续轮次使用。
 
@@ -15,12 +15,17 @@ import json
 import logging
 
 from agent.messages import extract_text
-from agent.prompts import PLAN_GENERATION_PROMPT, ROUTE_SYNTHESIS_PROMPT
+from agent.prompts import (
+    PLAN_GENERATION_PROMPT,
+    ROUTE_SYNTHESIS_PROMPT,
+    format_preference_block,
+)
 from agent.state import AgentState, RoutePlan
 from agent.state_sync import sync_state_from_tool_result
 from models.client import LLMClient
 from tools.registry import dispatch
 from utils.parser import safe_json_loads
+from utils.parser import strip_json_fence as _strip_json_fence
 
 logger = logging.getLogger(__name__)
 
@@ -28,46 +33,27 @@ logger = logging.getLogger(__name__)
 _ROUTE_SEARCH_RADIUS = 1000
 
 
-def _strip_json_fence(text: str) -> str:
-    """把模型可能多包的 ```json ... ``` 代码块剥掉，尽量留出干净的 JSON 文本。
-
-    模型有时不听话，会在 JSON 外面裹一层代码块或加一句解释。这里做两层兜底：
-    先去掉反引号围栏，再截取第一个 '{' 到最后一个 '}' 之间的内容。
-    """
-
-    cleaned = text.strip()
-
-    # 第一层：去掉 ```json / ``` 这种围栏
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        # strip 掉围栏后，开头可能残留 "json" 这一行语言标记，顺手去掉
-        if "\n" in cleaned:
-            first_line, rest = cleaned.split("\n", 1)
-            if first_line.strip().lower() in {"json", ""}:
-                cleaned = rest
-
-    # 第二层：截取最外层大括号之间的内容，丢掉前后多余的解释文字
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return cleaned[start : end + 1]
-    return cleaned
-
-
 def _plan_context(state: AgentState) -> str:
-    """把规划需要的位置、天气、时间约束压缩成一段上下文喂给 LLM。
+    """把规划需要的位置、天气、时间约束、以及已知偏好/否决压缩成一段上下文喂给 LLM。
 
     注意只带规划相关字段（不带 candidates / 历史），让计划阶段的 prompt 尽量短、聚焦。
+    阶段三起额外带上偏好与本会话否决，让排路线时就直接避开用户不想要的类别/地点。
     """
 
     snapshot = state.model_dump(
         mode="json",
         include={"location", "weather", "time_constraints"},
     )
-    return (
+    context = (
         "当前位置与天气（供你规划，不必复述）：\n"
         f"{json.dumps(snapshot, ensure_ascii=False, default=str)}"
     )
+
+    # 阶段三：把长期偏好 + 本会话否决拼进规划上下文，让计划阶段就遵守
+    constraints = format_preference_block(state.preferences, state.session_feedback)
+    if constraints:
+        context = f"{context}\n\n{constraints}"
+    return context
 
 
 async def generate_plan(

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from agent.state import UserPreferences, VetoRecord
+
 # 只在类型检查时导入 Intent，避免 prompts 与 router 在运行时互相 import 造成循环依赖。
 # 真正分支时我们比较 intent.value（字符串），所以运行期并不需要 Intent 这个类本身。
 if TYPE_CHECKING:
@@ -19,7 +21,7 @@ if TYPE_CHECKING:
 SYSTEM_PROMPT = """
 你是一个了解用户所在城市的本地探索向导，帮助用户规划轻松、有趣、适合当下条件的城市漫步。
 
-当前是单点推荐场景：基于 location、weather、candidates 给出零散的地点推荐即可，不要自行规划带先后顺序的路线（带顺序的路线由专门的路线规划路径处理）。不要假设用户的偏好、预算或拒绝列表等字段；如果需要这些信息，请从对话历史中读取，或直接向用户确认。
+当前是单点推荐场景：基于 location、weather、candidates 给出零散的地点推荐即可，不要自行规划带先后顺序的路线（带顺序的路线由专门的路线规划路径处理）。如果系统在下方提供了用户的已知偏好或本次对话的否决记录，请优先遵守它们；这些信息之外的偏好、预算等不要自行脑补，需要时从对话历史读取或直接向用户确认。
 
 如果 state.location 为空，先询问用户或等待外部系统传入位置，不要猜测位置。正式推荐前应先获取天气；雨天、极端高温或用户行动不便时，优先推荐室内或遮蔽条件好的场所。需要地点信息时调用地点搜索工具，并基于当前候选地点排序推荐。
 
@@ -102,16 +104,97 @@ ROUTER_PROMPT = """
 """.strip()
 
 
-def build_system_prompt(intent: "Intent") -> str:
-    """根据意图返回对应的系统提示词。
+# —— Reflexion：判断用户是否在否决上一轮推荐（阶段三）。 ——
+# 只输出 JSON，便于下游稳定解析。不是否决（新需求/追问/闲聊）就明确返回 is_veto=false。
+VETO_DETECTION_PROMPT = """
+你是反馈识别器。请判断用户这句话是否在否决或拒绝上一轮推荐里的某个地点。
+
+只输出一个 JSON 对象，不要输出任何额外文字或 Markdown：
+{
+  "is_veto": true 或 false,
+  "target": "被否决的地点名或用户的描述，如 第三个/那家酒吧；不是否决就留空字符串",
+  "reason": "推断的原因，如 太远/不喜欢这类/评价差；不是否决就留空字符串"
+}
+
+判定要点：
+- 只有当用户明确表达不满、拒绝、要求换掉某个推荐时，才算否决（is_veto=true）。
+- 提出全新需求、追问细节、或闲聊，都不是否决（is_veto=false）。
+""".strip()
+
+
+# —— 长期记忆：会话结束时把零散反馈提炼成稳定偏好（阶段三）。 ——
+# 关键约束：提炼成"抽象、可长期复用"的偏好，而非一次性事实；冲突时以近期为准。
+PREFERENCE_DISTILL_PROMPT = """
+你负责从一次对话的否决反馈和已有偏好中，提炼出值得长期保留的用户偏好。
+
+只输出一个 JSON 对象，不要输出任何额外文字或 Markdown：
+{
+  "items": [
+    {"tag": "抽象偏好，如 不爱酒吧/爱书店/走不动远路", "polarity": "like 或 dislike"}
+  ]
+}
+
+要求：
+- 提炼成稳定、可复用的倾向，不要写成"否决了某家具体的店"这种一次性事实。
+- 最多 6 条；与已有偏好矛盾时，以本次最近的反馈为准。
+- 没有可长期保留的内容就输出 {"items": []}。
+""".strip()
+
+
+def format_preference_block(
+    preferences: "UserPreferences | None",
+    session_feedback: "list[VetoRecord] | None",
+) -> str:
+    """把长期偏好 + 本会话否决拼成一段可注入 prompt 的约束文本；都为空时返回空串。
+
+    单点推荐（system prompt）和路线规划（plan context）共用这一份格式化逻辑，
+    保证两条路径对偏好的表达一致。
+    """
+
+    lines: list[str] = []
+
+    if preferences is not None and preferences.items:
+        likes = [item.tag for item in preferences.items if item.polarity == "like"]
+        dislikes = [item.tag for item in preferences.items if item.polarity != "like"]
+        if likes:
+            lines.append("长期偏好（尽量满足）：" + "、".join(likes))
+        if dislikes:
+            lines.append("长期不喜欢（尽量规避）：" + "、".join(dislikes))
+
+    if session_feedback:
+        vetoes = [
+            f"{record.target}（{record.reason}）" if record.reason else record.target
+            for record in session_feedback
+        ]
+        lines.append("本次对话已否决、不要再推荐：" + "；".join(vetoes))
+
+    if not lines:
+        return ""
+
+    body = "\n".join(f"- {line}" for line in lines)
+    return f"已知的用户偏好与反馈（请严格遵守）：\n{body}"
+
+
+def build_system_prompt(
+    intent: "Intent",
+    preferences: "UserPreferences | None" = None,
+    session_feedback: "list[VetoRecord] | None" = None,
+) -> str:
+    """根据意图返回对应的系统提示词，并在需要时追加偏好/否决约束（阶段三）。
 
     下游（loop）拿到 router 判定的 intent 后调用本函数，再也不直接引用某个写死的常量。
     这里用 intent.value（字符串）做分支，既能避免循环 import，也方便新增意图时扩展。
+    闲聊场景不注入偏好约束——用户只是打招呼，没必要把偏好列表塞进去。
     """
 
     if intent.value == "route_plan":
-        return ROUTE_PLAN_PROMPT
-    if intent.value == "chitchat":
+        base = ROUTE_PLAN_PROMPT
+    elif intent.value == "chitchat":
+        # 闲聊直接返回，不附加偏好约束
         return CHITCHAT_PROMPT
-    # single_spot 以及任何未来还没单独写 prompt 的意图，都安全退回默认推荐 prompt。
-    return SYSTEM_PROMPT
+    else:
+        # single_spot 以及任何未来还没单独写 prompt 的意图，都安全退回默认推荐 prompt。
+        base = SYSTEM_PROMPT
+
+    block = format_preference_block(preferences, session_feedback)
+    return f"{base}\n\n{block}" if block else base

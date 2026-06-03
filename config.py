@@ -38,6 +38,10 @@ class Config:
     session_dir: str
     session_id: str
 
+    # —— 长期偏好持久化（阶段三）：按用户存，独立于会话 ——
+    preference_dir: str
+    user_id: str
+
     # —— 日志（第 8 步）——
     log_level: str
     log_file: str | None
@@ -73,6 +77,8 @@ def load_config() -> Config:
         tencent_map_key=os.getenv("TENCENT_MAP_KEY"),
         session_dir=os.getenv("SESSION_DIR", ".sessions"),
         session_id=os.getenv("SESSION_ID", "default"),
+        preference_dir=os.getenv("PREFERENCE_DIR", ".preferences"),
+        user_id=os.getenv("USER_ID", "default"),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         log_file=os.getenv("LOG_FILE") or None,
     )

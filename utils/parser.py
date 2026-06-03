@@ -46,6 +46,33 @@ def clean_text(value: object) -> str:
     return str(value)
 
 
+def strip_json_fence(text: str) -> str:
+    """把模型可能多包的 ```json ... ``` 代码块剥掉，尽量留出干净的 JSON 文本。
+
+    模型常不听话：在 JSON 外裹一层代码块或加一句解释。这里做两层兜底——先去掉反引号
+    围栏，再截取第一个 '{' 到最后一个 '}' 之间的内容。planner 与 reflexion 都依赖它，
+    所以集中放在这里共用一份（第 10 步"重复解析逻辑就提取成公共模块"的延续）。
+    """
+
+    cleaned = text.strip()
+
+    # 第一层：去掉 ```json / ``` 这种围栏
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        # strip 掉围栏后，开头可能残留 "json" 这一行语言标记，顺手去掉
+        if "\n" in cleaned:
+            first_line, rest = cleaned.split("\n", 1)
+            if first_line.strip().lower() in {"json", ""}:
+                cleaned = rest
+
+    # 第二层：截取最外层大括号之间的内容，丢掉前后多余的解释文字
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
+
+
 def safe_json_loads(raw: str, default: Any = None) -> Any:
     """容错地解析 JSON 字符串，失败时记日志并返回 default。"""
 

@@ -40,10 +40,18 @@ class SessionStore:
             return None
 
     def save(self, session_id: str, state: AgentState) -> None:
-        """把当前会话写盘；写失败只记日志，不影响主流程继续对话。"""
+        """把当前会话写盘；写失败只记日志，不影响主流程继续对话。
+
+        阶段三关键不变量：排除 preferences。长期偏好按用户、由 PreferenceStore 单独存盘，
+        绝不混进会话文件——否则删除/重开会话就会连带丢掉用户攒下来的偏好。
+        session_feedback 属于本会话，照常一起存。
+        """
 
         path = self._path(session_id)
         try:
-            path.write_text(state.model_dump_json(indent=2), encoding="utf-8")
+            path.write_text(
+                state.model_dump_json(indent=2, exclude={"preferences"}),
+                encoding="utf-8",
+            )
         except Exception:
             logger.exception("会话状态写入失败：%s", path)

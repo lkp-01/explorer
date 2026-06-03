@@ -12,7 +12,8 @@ from agent.messages import (
     extract_text,
     extract_tool_calls,
 )
-from agent.planner import run_route_plan
+from agent.evaluator import run_with_evaluation
+from agent.planner import resynthesize_route, run_route_plan
 from agent.prompts import build_system_prompt
 from agent.reflexion import detect_veto
 from agent.router import Intent, classify
@@ -64,11 +65,15 @@ async def run_turn(
     client: LLMClient,
     state: AgentState,
     user_message: str,
+    eval_client: LLMClient | None = None,
 ) -> tuple[str, AgentState]:
     """执行一轮用户消息处理，返回助手回复和更新后的状态。
 
     client 由调用方（main）构造一次后注入，循环本身不关心 provider 细节。
     输入先过护栏，输出再过护栏——一进一出守住 agent 与外界的边界。
+
+    eval_client（阶段四）是评估专用客户端：单点推荐与路线规划产出回复后、机械护栏前，
+    走一次质量自检，不通过则带反馈重做。为 None 或评估关闭时自动跳过，行为退回阶段三。
     """
 
     updated_state = state.model_copy(deep=True)
@@ -99,7 +104,21 @@ async def run_turn(
             final_reply = await run_route_plan(client, updated_state, user_message)
         except Exception:
             logger.exception("路线规划执行失败")
+            # 排路线失败是错误兜底，不进质量自检（评估/重做对错误提示没有意义）
             final_reply = "我这边暂时排不出这条路线，请稍后再试或换个区域。"
+        else:
+            # —— 阶段四：路线成形后做一次质量自检，不通过则基于已回填路线重做 ——
+            async def _regenerate_route(feedback: str) -> str:
+                return await resynthesize_route(client, updated_state, feedback)
+
+            final_reply = await run_with_evaluation(
+                eval_client,
+                intent,
+                user_message,
+                final_reply,
+                updated_state,
+                _regenerate_route,
+            )
         # 复用同一套输出护栏与历史记录逻辑，保持各路径行为一致
         final_reply = clean_output(final_reply)
         updated_state.add_message("user", user_message)
@@ -116,6 +135,9 @@ async def run_turn(
     messages = build_messages(state, user_message, system_prompt)
     tools = get_openai_tools()
     final_reply = ""
+    # 标记本轮是否产出了"正常的推荐回复"（而非错误兜底/循环上限提示）。
+    # 只有正常回复才进阶段四质量自检——对错误提示做评估/重做没有意义。
+    is_normal_reply = False
 
     try:
         # —— 闲聊路径：只回一句，不进工具循环。调用 chat 时不传 tools，模型就不会去调天气/地点工具 ——
@@ -140,6 +162,7 @@ async def run_turn(
 
                 if not tool_calls:
                     final_reply = assistant_text
+                    is_normal_reply = True
                     break
 
                 for tool_call in tool_calls:
@@ -187,6 +210,35 @@ async def run_turn(
     except Exception:
         logger.exception("Agent 循环执行失败")
         final_reply = "我这边暂时无法完成本轮推荐，请稍后再试或检查 API 配置。"
+
+    # —— 阶段四：单点推荐的质量自检。只评估正常推荐回复；不通过则带反馈重做。 ——
+    # 重做不重跑工具：复用循环里已攒下工具结果的 messages，仅让模型基于已有候选重新合成。
+    if intent is Intent.SINGLE_SPOT and is_normal_reply:
+
+        async def _regenerate_single_spot(feedback: str) -> str:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"{feedback}\n"
+                        "请基于上面已有的候选地点重新给出推荐，不要新增未出现的地点。"
+                    ),
+                }
+            )
+            # 重做阶段不传 tools：只重新合成文本，避免再次触发工具调用
+            response = await client.chat(messages)
+            revised = extract_text(response.choices[0].message)
+            messages.append({"role": "assistant", "content": revised})
+            return revised
+
+        final_reply = await run_with_evaluation(
+            eval_client,
+            intent,
+            user_message,
+            final_reply,
+            updated_state,
+            _regenerate_single_spot,
+        )
 
     # —— 输出护栏：兜底空回复、拦截内部信息泄露、截断超长 ——
     final_reply = clean_output(final_reply)

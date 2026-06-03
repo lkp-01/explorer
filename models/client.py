@@ -36,10 +36,13 @@ class LLMClient:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        temperature: float | None = None,
     ) -> Any:
         """发起一次对话补全请求，返回原始响应对象。
 
         只有在确实有工具时才传 tools 字段，避免给某些兼容服务传空列表。
+        temperature 仅在显式传入时才下发——评估器（阶段四）用它压低随机性，
+        普通生成调用不传则保持服务端默认，对既有调用零影响。
         """
 
         kwargs: dict[str, Any] = {
@@ -49,6 +52,8 @@ class LLMClient:
         }
         if tools:
             kwargs["tools"] = tools
+        if temperature is not None:
+            kwargs["temperature"] = temperature
 
         return await self._client.chat.completions.create(**kwargs)
 
@@ -63,5 +68,24 @@ def build_client() -> LLMClient | None:
         api_key=config.api_key or "",
         base_url=config.base_url,
         model=config.model,
+        max_tokens=config.max_tokens,
+    )
+
+
+def build_evaluator_client() -> LLMClient | None:
+    """构造评估专用客户端（阶段四）：与生成端物理隔离，可换更便宜的模型。
+
+    复用同一套凭据与 base_url，仅模型可能不同（config.eval_model 默认回退到主模型）。
+    独立成一个实例，是为了让"生成"与"评估"互不串味——这正是 Evaluator-Optimizer
+    要避免"自己评自己"盲点的设计意图。没有 API Key 时返回 None，调用方据此跳过评估。
+    """
+
+    if not config.has_llm_key:
+        return None
+
+    return LLMClient(
+        api_key=config.api_key or "",
+        base_url=config.base_url,
+        model=config.eval_model,
         max_tokens=config.max_tokens,
     )

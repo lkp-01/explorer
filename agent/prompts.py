@@ -141,6 +141,88 @@ PREFERENCE_DISTILL_PROMPT = """
 """.strip()
 
 
+# —— Evaluator-Optimizer：输出质量自检（阶段四）。 ——
+# 关键约束：只输出结构化 JSON（passed + 各维度 ok/detail），便于下游稳定解析、按维度给反馈。
+# 评估器 prompt 刻意和生成器 prompt 独立，避免"同一个模型自己评自己"的盲点。
+EVALUATOR_PROMPT = """
+你是城市漫步推荐的质量审核员。下面会给你：用户的原始需求、当前天气与已知偏好、以及一版待发出的回复。
+请逐条按检查清单审核这版回复，判断它能否直接发给用户。
+
+只输出一个 JSON 对象，不要输出任何额外文字或 Markdown：
+{
+  "passed": true 或 false,
+  "issues": [
+    {"dimension": "维度名", "ok": true 或 false, "detail": "不通过时给出具体问题；通过留空字符串"}
+  ]
+}
+
+判定要点：
+- 只要有任一关键维度 ok=false，passed 就应为 false。
+- detail 要具体指出问题所在（哪一处、为什么），不要写"质量不高"这类空话，便于生成端据此改进。
+- 审核的是"是否合格可发"，不是吹毛求疵；合理的回复应判 passed=true。
+""".strip()
+
+
+# 各检查维度的说明文本。按 intent 取舍：单点推荐不查"路线顺序地理合理性"。
+_EVAL_DIMENSIONS_COMMON = """
+检查清单：
+- intent_match：是否回答了用户真正想要的（例如用户要一条有顺序的路线，却只给了零散几个点；或反之）。
+- weather_fit：雨天、极端高温或用户行动不便时，是否优先给了室内/有遮蔽的去处，而非露天场所。
+- reason_quality：每个推荐是否给了具体的推荐理由，而不是"环境不错""值得一去"这类套话。
+- pref_respect：是否违反了下方列出的用户长期偏好或本次对话已否决的内容。
+""".strip()
+
+_EVAL_DIMENSION_ROUTE = (
+    "- route_geo：路线各站的先后顺序是否地理合理（不来回折返、相邻两站不过分绕远）。"
+)
+
+# 轻量评估只看"答没答对 + 内容够不够"，为阶段六 REWOO 的快速路径预留。
+_EVAL_DIMENSIONS_LIGHT = """
+检查清单（轻量）：
+- intent_match：是否回答了用户真正想要的东西。
+- completeness：是否给出了足够的地点信息（数量、必要细节）能让用户用得上。
+""".strip()
+
+
+def build_evaluator_prompt(intent: "Intent", level: str = "full") -> str:
+    """按意图与评估档位组装评估器系统提示词（阶段四）。
+
+    full：完整质量清单，路线意图额外加 route_geo 维度。
+    lightweight：只查意图匹配与完整性，供 REWOO 等快速路径用，省一次深度评估的成本。
+    """
+
+    if level == "lightweight":
+        return f"{EVALUATOR_PROMPT}\n\n{_EVAL_DIMENSIONS_LIGHT}"
+
+    checklist = _EVAL_DIMENSIONS_COMMON
+    if intent.value == "route_plan":
+        checklist = f"{checklist}\n{_EVAL_DIMENSION_ROUTE}"
+    return f"{EVALUATOR_PROMPT}\n\n{checklist}"
+
+
+def format_eval_feedback_block(issues: "list[dict] | None") -> str:
+    """把评估未通过的维度意见拼成一段注入文本，供生成端重做时遵循（阶段四）。
+
+    只收 ok=false 且有 detail 的条目；没有可用意见时返回一句通用改进要求，
+    保证 regenerate 永远拿得到一句可操作的反馈。
+    """
+
+    lines: list[str] = []
+    for issue in issues or []:
+        if not isinstance(issue, dict) or issue.get("ok"):
+            continue
+        detail = str(issue.get("detail") or "").strip()
+        dimension = str(issue.get("dimension") or "").strip()
+        if detail:
+            lines.append(f"- [{dimension}] {detail}" if dimension else f"- {detail}")
+
+    if not lines:
+        return "上一版回复未通过质量自检，请整体重写得更贴合用户需求、理由更具体。"
+
+    body = "\n".join(lines)
+    return f"上一版回复未通过质量自检，存在以下问题，请针对性改进后重写：\n{body}"
+
+
 def format_preference_block(
     preferences: "UserPreferences | None",
     session_feedback: "list[VetoRecord] | None",

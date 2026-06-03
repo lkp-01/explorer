@@ -151,20 +151,47 @@ async def _synthesize_route(
     client: LLMClient,
     state: AgentState,
     plan: RoutePlan,
+    feedback: str | None = None,
 ) -> str:
-    """第二段收尾：把回填好的路线交给 LLM，合成一段自然的中文路线推荐。"""
+    """第二段收尾：把回填好的路线交给 LLM，合成一段自然的中文路线推荐。
+
+    feedback 非空时（阶段四质量自检不通过后的重做），把评估意见一并交给模型，
+    要求据此改进——但仍只基于已回填的路线，不重跑搜索、不新增地点。
+    """
 
     payload = {
         "weather": state.weather.model_dump() if state.weather else None,
         "route": plan.model_dump(),
     }
+    user_content = json.dumps(payload, ensure_ascii=False, default=str)
+    if feedback:
+        user_content = (
+            f"{user_content}\n\n{feedback}\n"
+            "请只基于上面给定的路线信息改写，不要新增未出现的地点。"
+        )
     messages = [
         {"role": "system", "content": ROUTE_SYNTHESIS_PROMPT},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+        {"role": "user", "content": user_content},
     ]
 
     response = await client.chat(messages)
     return extract_text(response.choices[0].message)
+
+
+async def resynthesize_route(
+    client: LLMClient,
+    state: AgentState,
+    feedback: str,
+) -> str:
+    """阶段四重做入口：基于 state 里已回填的路线 + 评估反馈，重新合成路线回复。
+
+    不重跑计划与搜索，只重新讲一遍——供 loop 的评估-优化环作为 regenerate 回调使用。
+    state.route_plan 为空（极少见）时返回空串，让评估环放行上一版。
+    """
+
+    if state.route_plan is None:
+        return ""
+    return await _synthesize_route(client, state, state.route_plan, feedback)
 
 
 async def execute_plan(

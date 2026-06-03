@@ -27,6 +27,13 @@ class Config:
     max_tool_turns: int
     max_tokens: int
 
+    # —— 输出质量自检 Evaluator-Optimizer（阶段四）——
+    # 生成回复后、机械护栏前插入一次独立评估；不通过则带反馈重做，最多 eval_max_retries 次。
+    eval_enabled: bool          # 总开关，延迟敏感场景可关
+    eval_max_retries: int       # 不通过时最多重做几次（建议 1-2）
+    eval_model: str             # 评估用模型，默认回退到主模型，可指向更便宜的
+    eval_temperature: float     # 评估调用的 temperature，低温更稳定
+
     # —— 和风天气 ——
     qweather_api_key: str | None
     qweather_api_host: str
@@ -72,6 +79,16 @@ def load_config() -> Config:
         ),
         max_tool_turns=int(os.getenv("MAX_TOOL_TURNS", "8")),
         max_tokens=int(os.getenv("MAX_TOKENS", "1200")),
+        eval_enabled=os.getenv("EVAL_ENABLED", "true").strip().lower() != "false",
+        eval_max_retries=int(os.getenv("EVAL_MAX_RETRIES", "1")),
+        # 没配 EVAL_MODEL 就复用主模型（DEEPSEEK_MODEL/OPENAI_MODEL），保证开箱即用
+        eval_model=(
+            os.getenv("EVAL_MODEL")
+            or os.getenv("DEEPSEEK_MODEL")
+            or os.getenv("OPENAI_MODEL")
+            or DEFAULT_MODEL_NAME
+        ),
+        eval_temperature=float(os.getenv("EVAL_TEMPERATURE", "0.0")),
         qweather_api_key=os.getenv("QWEATHER_API_KEY"),
         qweather_api_host=os.getenv("QWEATHER_API_HOST") or DEFAULT_QWEATHER_API_HOST,
         tencent_map_key=os.getenv("TENCENT_MAP_KEY"),

@@ -8,7 +8,7 @@ from config import config
 from memory.history import compact
 from memory.preference_store import PreferenceStore
 from memory.storage import SessionStore
-from models.client import build_client
+from models.client import build_client, build_evaluator_client
 from utils.logger import configure_logging
 
 DEFAULT_LAT, DEFAULT_LNG = 35.6595, 139.7004
@@ -48,6 +48,9 @@ async def main() -> None:
         )
         return
 
+    # 阶段四：评估专用客户端，构造一次后整会话复用；无 Key 或评估关闭时为 None，自动跳过
+    eval_client = build_evaluator_client()
+
     store = SessionStore(config.session_dir)
     pref_store = PreferenceStore(config.preference_dir)
 
@@ -75,7 +78,9 @@ async def main() -> None:
                     break
                 if not user_message:
                     continue
-                reply, state = await run_turn(client, state, user_message)
+                reply, state = await run_turn(
+                    client, state, user_message, eval_client=eval_client
+                )
                 print(reply)
                 # 每轮后压缩并落盘：状态不膨胀，重启也能接着聊
                 compact(state)

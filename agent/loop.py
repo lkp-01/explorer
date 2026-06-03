@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import logging
 
-from agent.evaluator import run_with_evaluation
+from agent.evaluator import evaluate, run_with_evaluation
 from agent.messages import build_messages, extract_text
 from agent.parallel import run_complex_task, run_multi_plan
 from agent.planner import resynthesize_route, run_route_plan
 from agent.prompts import build_system_prompt
 from agent.react import react_generate
 from agent.reflexion import detect_veto
+from agent.rewoo import run_fast_mode
 from agent.router import Intent, classify
 from agent.state import AgentState
 from guardrails.input_filter import check_input
@@ -33,6 +34,7 @@ _RECOMMENDATION_INTENTS = (
     Intent.ROUTE_PLAN,
     Intent.MULTI_PLAN,
     Intent.COMPLEX_TASK,
+    Intent.FAST_MODE,
 )
 
 
@@ -115,6 +117,33 @@ async def run_turn(
             logger.exception("复杂请求执行失败")
             final_reply = "我这边暂时没能兼顾你的多个要求，请稍后再试或拆开来分别告诉我。"
         return _finish_turn(updated_state, user_message, final_reply)
+
+    # —— 快速模式（阶段六 REWOO）：一次规划全部工具调用 → 批量执行 → 单次合成 ——
+    # 与阶段四协调：只做轻量评估（格式+完整性）。不通过不在 REWOO 内部重做，而是降级为
+    # 单点意图、贯穿到下方标准 ReAct 路径作为回退——REWOO 缺中间纠错，靠 ReAct 兜底。
+    if intent is Intent.FAST_MODE:
+        try:
+            fast_reply = await run_fast_mode(client, updated_state, user_message)
+        except Exception:
+            logger.exception("REWOO 快速模式执行失败，回退标准 ReAct")
+            fast_reply = ""
+
+        if fast_reply.strip():
+            result = await evaluate(
+                eval_client,
+                intent,
+                user_message,
+                fast_reply,
+                updated_state,
+                level="lightweight",
+            )
+            # 无评估客户端时不拦（评估只是增益）；通过则直接返回这版快回复
+            if eval_client is None or result.passed:
+                return _finish_turn(updated_state, user_message, fast_reply)
+            logger.info("REWOO 轻量评估未通过，降级为单点推荐回退")
+
+        # 计划为空 / 回复为空 / 评估未过：降级为单点意图，落到下方标准 ReAct 路径
+        intent = Intent.SINGLE_SPOT
 
     # —— 闲聊路径：只回一句，不进工具循环。调用 chat 时不传 tools，模型就不会去调天气/地点工具 ——
     if intent is Intent.CHITCHAT:

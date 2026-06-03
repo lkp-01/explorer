@@ -132,12 +132,33 @@ def test_rule_layer_hits_complex_task() -> None:
     assert client.call_count == 0
 
 
+def test_rule_layer_hits_fast_mode() -> None:
+    """带"赶时间/快速"等词的句子，应由规则层判为快速模式，且不调用模型。"""
+
+    client = _FakeClient(reply="single_spot")
+    intent = _run(classify(client, "我赶时间，快速给我附近几个吃饭的地方"))
+    assert intent is Intent.FAST_MODE, intent
+    assert client.call_count == 0
+
+
+def test_fast_keyword_with_route_stays_route() -> None:
+    """"赶时间排条路线"里路线意图更强，应仍判为路线而非快速模式。"""
+
+    client = _FakeClient(reply="single_spot")
+    intent = _run(classify(client, "我赶时间，帮我排一条逛一天的路线"))
+    assert intent is Intent.ROUTE_PLAN, intent
+
+
 def test_llm_layer_parses_new_intents() -> None:
     """规则拿不准时走 LLM；模型返回新枚举词也应能解析出来。"""
 
     client = _FakeClient(reply="complex_task")
     intent = _run(classify(client, "帮我想想这事儿怎么安排比较好"))
     assert intent is Intent.COMPLEX_TASK, intent
+
+    client = _FakeClient(reply="fast_mode")
+    intent = _run(classify(client, "这事儿你看着办，别太慢"))
+    assert intent is Intent.FAST_MODE, intent
 
 
 def test_build_system_prompt_per_intent() -> None:

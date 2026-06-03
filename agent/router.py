@@ -33,6 +33,7 @@ class Intent(str, Enum):
     ROUTE_PLAN = "route_plan"    # 路线规划：把多个点串成一条有先后顺序的路线
     MULTI_PLAN = "multi_plan"    # 多方案：同一需求出多个变体方案，平行呈现给用户选（阶段五）
     COMPLEX_TASK = "complex_task"  # 复杂请求：一个需求拆成多个子需求并发执行后合并（阶段五）
+    FAST_MODE = "fast_mode"      # 快速模式：赶时间，一次规划全部工具调用、批量执行、单次合成（阶段六 REWOO）
 
 
 # —— 规则兜底层的关键词表 ——
@@ -85,6 +86,21 @@ _COMPLEX_TASK_KEYWORDS = (
     "一家老小",
 )
 
+# 快速模式关键词（阶段六 REWOO）：用户明确赶时间，要的是速度而非精细纠错。
+# 命中即走 REWOO 一次性规划、批量执行、单次合成的快路径。判定从严，避免普通请求被误判成赶时间。
+_FAST_KEYWORDS = (
+    "快速",
+    "赶时间",
+    "着急",
+    "急着",
+    "马上",
+    "快点",
+    "速战速决",
+    "简单给",
+    "随便快",
+    "尽快",
+)
+
 # 闲聊关键词。判定时还会额外要求句子很短（见下），避免"附近有好玩的吗"被误判成闲聊。
 _CHITCHAT_KEYWORDS = (
     "你好",
@@ -121,6 +137,10 @@ def _rule_classify(text: str) -> Intent | None:
     # 路线类关键词较"强"：出现就基本可以确定是排一条有顺序的路线。
     if any(keyword in lowered for keyword in _ROUTE_KEYWORDS):
         return Intent.ROUTE_PLAN
+
+    # 快速模式：明确表达赶时间，走 REWOO 快路径。放在路线之后——"赶时间排条路线"仍按路线处理。
+    if any(keyword in lowered for keyword in _FAST_KEYWORDS):
+        return Intent.FAST_MODE
 
     # 闲聊判定从严：必须同时满足"句子很短"和"命中问候词"，
     # 否则像"你好，附近有什么好吃的"这种其实是带需求的，不该被当成纯闲聊。

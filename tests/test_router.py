@@ -114,6 +114,32 @@ def test_llm_failure_falls_back_to_single_spot() -> None:
     assert intent is Intent.SINGLE_SPOT, intent
 
 
+def test_rule_layer_hits_multi_plan() -> None:
+    """带"两套方案"等词的句子，应由规则层判为多方案，且优先于路线（即便夹了"路线"二字）。"""
+
+    client = _FakeClient(reply="route_plan")  # 故意设错，命中规则就不该用到它
+    intent = _run(classify(client, "给我雨天和晴天两套路线方案对比一下"))
+    assert intent is Intent.MULTI_PLAN, intent
+    assert client.call_count == 0
+
+
+def test_rule_layer_hits_complex_task() -> None:
+    """带多重并列约束（适合老人和小孩）的句子，应由规则层判为复杂请求。"""
+
+    client = _FakeClient(reply="single_spot")
+    intent = _run(classify(client, "找个适合老人和小孩都能去的地方"))
+    assert intent is Intent.COMPLEX_TASK, intent
+    assert client.call_count == 0
+
+
+def test_llm_layer_parses_new_intents() -> None:
+    """规则拿不准时走 LLM；模型返回新枚举词也应能解析出来。"""
+
+    client = _FakeClient(reply="complex_task")
+    intent = _run(classify(client, "帮我想想这事儿怎么安排比较好"))
+    assert intent is Intent.COMPLEX_TASK, intent
+
+
 def test_build_system_prompt_per_intent() -> None:
     """每种意图都应拿到对应的系统提示词。"""
 

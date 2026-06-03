@@ -31,6 +31,8 @@ class Intent(str, Enum):
     CHITCHAT = "chitchat"        # 闲聊、问候、与漫步无关的对话
     SINGLE_SPOT = "single_spot"  # 单点推荐：找几个地方逛逛（升级前的默认行为）
     ROUTE_PLAN = "route_plan"    # 路线规划：把多个点串成一条有先后顺序的路线
+    MULTI_PLAN = "multi_plan"    # 多方案：同一需求出多个变体方案，平行呈现给用户选（阶段五）
+    COMPLEX_TASK = "complex_task"  # 复杂请求：一个需求拆成多个子需求并发执行后合并（阶段五）
 
 
 # —— 规则兜底层的关键词表 ——
@@ -49,6 +51,38 @@ _ROUTE_KEYWORDS = (
     "安排一天",
     "先去",
     "动线",
+)
+
+# 多方案关键词（阶段五 #3）：用户想要"同一需求的多个变体方案"并排比较。
+# 这类词比单点/路线都"强"——一旦出现"两套方案/分别给我"，基本可以确定要并行出方案。
+_MULTI_PLAN_KEYWORDS = (
+    "两套",
+    "两种方案",
+    "三套",
+    "几套方案",
+    "多个方案",
+    "多套方案",
+    "几种方案",
+    "分别给我",
+    "都给我看看",
+    "对比一下",
+    "做个对比",
+    "plan a",  # "Plan A / Plan B" 式表述
+)
+
+# 复杂请求关键词（阶段五 #6）：一个需求里夹着"又要…又要 / 既…也…"等多重并列约束，
+# 需要拆成多个子查询并发执行、再交叉合并。判定从严，避免普通单点需求被误拆。
+_COMPLEX_TASK_KEYWORDS = (
+    "又要",
+    "既要",
+    "还要顺便",
+    "同时满足",
+    "都能去",
+    "都合适",
+    "既适合",
+    "适合老人和小孩",
+    "老人和小孩",
+    "一家老小",
 )
 
 # 闲聊关键词。判定时还会额外要求句子很短（见下），避免"附近有好玩的吗"被误判成闲聊。
@@ -75,7 +109,16 @@ def _rule_classify(text: str) -> Intent | None:
 
     lowered = text.lower()
 
-    # 路线类关键词最"强"：一旦出现，基本可以确定是排路线，所以优先判断。
+    # 多方案最优先：像"给我两套方案"这类即便夹了"路线"二字，本质也是要多个变体并排比较，
+    # 所以必须排在路线之前判断，否则"两套路线方案"会被路线关键词抢先吃掉。
+    if any(keyword in lowered for keyword in _MULTI_PLAN_KEYWORDS):
+        return Intent.MULTI_PLAN
+
+    # 复杂请求次之：一句话里塞了多重并列约束（又要…又要），需要拆开并发再合并。
+    if any(keyword in lowered for keyword in _COMPLEX_TASK_KEYWORDS):
+        return Intent.COMPLEX_TASK
+
+    # 路线类关键词较"强"：出现就基本可以确定是排一条有顺序的路线。
     if any(keyword in lowered for keyword in _ROUTE_KEYWORDS):
         return Intent.ROUTE_PLAN
 

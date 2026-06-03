@@ -40,6 +40,8 @@ class Config:
 
     # —— 腾讯位置服务 ——
     tencent_map_key: str | None
+    # 并发上限（阶段五）：多方案/复杂请求会并发触发多次地点搜索，限流避免触顶日调用额度。
+    tencent_max_concurrency: int
 
     # —— 记忆持久化（第 7 步）——
     session_dir: str
@@ -92,6 +94,7 @@ def load_config() -> Config:
         qweather_api_key=os.getenv("QWEATHER_API_KEY"),
         qweather_api_host=os.getenv("QWEATHER_API_HOST") or DEFAULT_QWEATHER_API_HOST,
         tencent_map_key=os.getenv("TENCENT_MAP_KEY"),
+        tencent_max_concurrency=max(1, int(os.getenv("TENCENT_MAX_CONCURRENCY", "3"))),
         session_dir=os.getenv("SESSION_DIR", ".sessions"),
         session_id=os.getenv("SESSION_ID", "default"),
         preference_dir=os.getenv("PREFERENCE_DIR", ".preferences"),

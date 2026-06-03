@@ -1,5 +1,6 @@
 """封装腾讯位置服务周边地点搜索工具。"""
 
+import asyncio
 import logging
 from typing import Any
 
@@ -13,6 +14,11 @@ logger = logging.getLogger(__name__)
 
 TENCENT_PLACE_SEARCH_URL = "https://apis.map.qq.com/ws/place/v1/search"
 TENCENT_DAILY_LIMIT_STATUS = 121
+
+# 并发闸门（阶段五）：阶段五的并行框架会同时跑多个子任务，各自调用 search_places，
+# 对腾讯接口形成并发请求。用一个信号量把同时在飞的请求数压到配置上限以内，
+# 既保护日调用额度，也避免短时打爆触发限流。单点/路线等非并发路径几乎不受影响。
+_TENCENT_GATE = asyncio.Semaphore(config.tencent_max_concurrency)
 
 CATEGORY_KEYWORDS: dict[str, str] = {
     "restaurant": "餐厅",
@@ -99,9 +105,11 @@ async def search_places(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(TENCENT_PLACE_SEARCH_URL, params=params)
-            response.raise_for_status()
+        # 信号量限并发：超出上限的搜索请求在此排队，待前面的放行后再发，避免并发触顶额度。
+        async with _TENCENT_GATE:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(TENCENT_PLACE_SEARCH_URL, params=params)
+                response.raise_for_status()
 
         payload = response.json()
         status = int(payload.get("status") or 0)

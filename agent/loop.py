@@ -12,6 +12,7 @@ from agent.messages import (
     extract_text,
     extract_tool_calls,
 )
+from agent.planner import run_route_plan
 from agent.prompts import build_system_prompt
 from agent.router import Intent, classify
 from agent.state import AgentState
@@ -81,6 +82,20 @@ async def run_turn(
 
     # —— 意图分流（阶段一）：先判断这句话该走哪条路径，再决定用哪套 prompt、是否进工具循环 ——
     intent = await classify(client, user_message)
+
+    # —— 路线规划（阶段二）：走独立的 Plan-and-Solve 路径，不进通用 ReAct 循环 ——
+    if intent is Intent.ROUTE_PLAN:
+        try:
+            final_reply = await run_route_plan(client, updated_state, user_message)
+        except Exception:
+            logger.exception("路线规划执行失败")
+            final_reply = "我这边暂时排不出这条路线，请稍后再试或换个区域。"
+        # 复用同一套输出护栏与历史记录逻辑，保持各路径行为一致
+        final_reply = clean_output(final_reply)
+        updated_state.add_message("user", user_message)
+        updated_state.add_message("assistant", final_reply)
+        return final_reply, updated_state
+
     system_prompt = build_system_prompt(intent)
 
     messages = build_messages(state, user_message, system_prompt)

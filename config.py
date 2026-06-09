@@ -43,6 +43,12 @@ class Config:
     # 并发上限（阶段五）：多方案/复杂请求会并发触发多次地点搜索，限流避免触顶日调用额度。
     tencent_max_concurrency: int
 
+    # —— MCP 接入（feature/mcp）——
+    # mcp_enabled：总开关。没装 mcp 包、没配 server、或不想用时设 false，agent 退回纯本地工具。
+    # mcp_config_path：mcp_servers.json 的路径，里面列出要连接哪些外部 MCP server。
+    mcp_enabled: bool
+    mcp_config_path: str
+
     # —— 记忆持久化（第 7 步）——
     session_dir: str
     session_id: str
@@ -91,6 +97,9 @@ def load_config() -> Config:
             or DEFAULT_MODEL_NAME
         ),
         eval_temperature=float(os.getenv("EVAL_TEMPERATURE", "0.0")),
+        # MCP 接入（feature/mcp）：默认开启；缺包/缺配置时由 mcp_client 静默跳过，不会报错。
+        mcp_enabled=os.getenv("MCP_ENABLED", "true").strip().lower() != "false",
+        mcp_config_path=os.getenv("MCP_CONFIG_PATH", "mcp_servers.json"),
         qweather_api_key=os.getenv("QWEATHER_API_KEY"),
         qweather_api_host=os.getenv("QWEATHER_API_HOST") or DEFAULT_QWEATHER_API_HOST,
         tencent_map_key=os.getenv("TENCENT_MAP_KEY"),

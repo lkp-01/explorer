@@ -44,6 +44,28 @@ def register_tool(
     return decorator
 
 
+def register_tool_spec(spec: ToolSpec) -> bool:
+    """直接登记一个已经构造好的 ToolSpec（feature/mcp）。
+
+    与 register_tool 装饰器的区别：
+    - register_tool 用于"写代码时就知道工具长什么样"的本地工具（天气/地点/地址解析）；
+    - register_tool_spec 用于"运行时才从外部拿到"的工具——典型就是 MCP 客户端连上 server、
+      list_tools() 之后，把每个远程工具包成 ToolSpec 在这里登记进来。
+
+    两条路径登记进的是同一个 TOOL_REGISTRY，所以下游的 get_openai_tools() / dispatch()
+    对工具来源完全无感知——这正是让 agent 决策逻辑（ReAct/并行/REWOO）一行都不用改的关键。
+
+    返回是否登记成功：名字已存在时跳过并返回 False，避免外部工具悄悄覆盖掉同名的本地工具。
+    """
+
+    if spec.name in TOOL_REGISTRY:
+        logger.warning("工具名已存在，跳过注册：%s", spec.name)
+        return False
+
+    TOOL_REGISTRY[spec.name] = spec
+    return True
+
+
 def get_openai_tools() -> list[dict[str, Any]]:
     """把内部工具注册表转换为 OpenAI 兼容的 tools 参数格式。"""
 

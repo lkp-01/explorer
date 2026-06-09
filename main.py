@@ -9,6 +9,7 @@ from memory.history import compact
 from memory.preference_store import PreferenceStore
 from memory.storage import SessionStore
 from models.client import build_client, build_evaluator_client
+from tools.mcp_client import MCPManager, load_mcp_servers
 from utils.logger import configure_logging
 
 DEFAULT_LAT, DEFAULT_LNG = 35.6595, 139.7004
@@ -54,6 +55,22 @@ async def main() -> None:
     store = SessionStore(config.session_dir)
     pref_store = PreferenceStore(config.preference_dir)
 
+    # —— 接入 MCP（feature/mcp）：把 mcp_servers.json 里的外部 server 工具桥接进本地工具表 ——
+    # 在进入对话循环之前连接，让模型从第一轮起就能看到 MCP 工具。整段是 fail-open：
+    # 关了开关 / 没装包 / 连不上，都只是少几个工具，agent 照常用本地工具工作。
+    mcp_manager = MCPManager()
+    if config.mcp_enabled:
+        try:
+            servers = load_mcp_servers(config.mcp_config_path)
+            await mcp_manager.connect_all(servers)
+            if mcp_manager.tool_count:
+                print(
+                    f"已接入 {len(mcp_manager.sessions)} 个 MCP 服务，"
+                    f"新增 {mcp_manager.tool_count} 个工具。"
+                )
+        except Exception:
+            print("（MCP 接入失败，本次仅使用本地工具，不影响使用。）")
+
     try:
         # 优先恢复上次会话；没有就新开一个，并在缺少位置时才询问
         state = store.load(config.session_id)
@@ -92,6 +109,9 @@ async def main() -> None:
                 print("本轮调用失败，请检查 API Key、网络或模型配置后重试。")
     except Exception:
         print("启动失败，请检查 .env、依赖安装和经纬度输入格式。")
+    finally:
+        # 无论正常退出、异常还是 Ctrl-C，都干净地断开 MCP 连接，避免 server 子进程残留。
+        await mcp_manager.close()
 
 
 if __name__ == "__main__":

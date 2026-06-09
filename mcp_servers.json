@@ -1,0 +1,15 @@
+{
+  "_说明": "这里列出要接入的外部 MCP server。格式照搬 Claude Desktop / Cursor 的惯例。",
+  "_工作方式": "agent 启动时会逐个把这些 server 作为子进程拉起（command + args），用 stdio 通信，然后 list_tools() 拿到它们的工具，桥接进本地工具表。删/加 server 只动这个文件，不碰代码。",
+  "_前置条件": "fetch 需要本机有 uvx（来自 uv），filesystem 需要本机有 npx（来自 Node）。没有对应命令时，该 server 会连接失败并被自动跳过，不影响其它 server 和本地工具。",
+  "mcpServers": {
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./itineraries"]
+    }
+  }
+}

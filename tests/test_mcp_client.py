@@ -1,4 +1,4 @@
-"""MCP 客户端层的最小单测（feature/mcp）。
+"""MCP 客户端层的最小单测（阶段七）。
 
 为什么这样测：真实的 MCP 接入要拉起子进程（uvx/npx）、走 stdio 协议，慢且依赖外部环境，
 不适合放进单测。但 MCP 桥接的"核心契约"其实和子进程无关——它是：
@@ -6,10 +6,13 @@
   并且 dispatch() 调用时，能不能通过闭包把参数发给 session、把结果取回来。
 
 所以这里用一个**假的 ClientSession**（不联网、不起进程，按预设返回），直接验证这条契约。
-覆盖三件事：
+覆盖六件事：
 1. load_mcp_servers 能读配置、并过滤掉 _ 开头的说明字段、文件缺失时返回空；
 2. _register_tools 能把远程工具以 mcp__<server>__<tool> 的名字登记进 TOOL_REGISTRY；
-3. dispatch 调用 MCP 工具时，正常结果与错误结果都能正确桥接。
+3. dispatch 调用 MCP 工具时，正常结果与错误结果都能正确桥接；
+4. allowTools / denyTools 能按配置过滤远程工具（阶段七）；
+5. list_tools 带 nextCursor 分页时能翻页取全（阶段七）；
+6. 单次调用超时返回结构化错误，不挂起、不抛异常（阶段七）。
 
 本文件不依赖 pytest，直接 `python tests/test_mcp_client.py` 即可运行。
 """
@@ -185,6 +188,108 @@ def test_extract_text_joins_text_blocks() -> None:
         content = []
 
     assert _extract_text(_Empty()) == ""
+
+
+class _FakeMultiToolSession(_FakeSession):
+    """报多个工具的假 session，测 allowTools / denyTools 过滤。"""
+
+    def __init__(self, names: list[str]) -> None:
+        super().__init__()
+        self._names = names
+
+    async def list_tools(self) -> _FakeListResult:
+        return _FakeListResult(
+            [
+                _FakeTool(name=name, description="", input_schema={"type": "object"})
+                for name in self._names
+            ]
+        )
+
+
+def test_allow_and_deny_tools_filtering() -> None:
+    """allowTools 只放行名单内的；denyTools 一律拦下；名单针对远程原始名。"""
+
+    # 白名单：三个工具只放行 read / write
+    manager = MCPManager()
+    session = _FakeMultiToolSession(["read", "write", "delete"])
+    _run(
+        manager._register_tools(
+            "fs_allow", session, {"allowTools": ["read", "write"]}
+        )
+    )
+    assert "mcp__fs_allow__read" in TOOL_REGISTRY
+    assert "mcp__fs_allow__write" in TOOL_REGISTRY
+    assert "mcp__fs_allow__delete" not in TOOL_REGISTRY
+    assert manager.tool_count == 2
+
+    # 黑名单：只拦 delete
+    manager = MCPManager()
+    session = _FakeMultiToolSession(["read", "delete"])
+    _run(manager._register_tools("fs_deny", session, {"denyTools": ["delete"]}))
+    assert "mcp__fs_deny__read" in TOOL_REGISTRY
+    assert "mcp__fs_deny__delete" not in TOOL_REGISTRY
+    assert manager.tool_count == 1
+
+    # 不配名单：全部放行（与旧行为一致，老调用方不传 cfg 也安全）
+    manager = MCPManager()
+    _run(manager._register_tools("fs_open", _FakeMultiToolSession(["read", "delete"])))
+    assert "mcp__fs_open__delete" in TOOL_REGISTRY
+    assert manager.tool_count == 2
+
+
+class _FakePagedSession(_FakeSession):
+    """list_tools 分两页返回的假 session，测 nextCursor 翻页。"""
+
+    async def list_tools(self, cursor: str | None = None) -> _FakeListResult:
+        if cursor is None:
+            page = _FakeListResult(
+                [_FakeTool(name="page1_tool", description="", input_schema={})]
+            )
+            page.nextCursor = "page2"
+            return page
+        assert cursor == "page2", cursor
+        return _FakeListResult(
+            [_FakeTool(name="page2_tool", description="", input_schema={})]
+        )
+
+
+def test_list_tools_pagination() -> None:
+    """server 分页报工具时，应跟着 nextCursor 翻页，两页工具都登记进来。"""
+
+    manager = MCPManager()
+    _run(manager._register_tools("paged", _FakePagedSession()))
+    assert "mcp__paged__page1_tool" in TOOL_REGISTRY
+    assert "mcp__paged__page2_tool" in TOOL_REGISTRY
+    assert manager.tool_count == 2
+
+
+class _FakeSlowSession(_FakeSession):
+    """call_tool 故意拖时间的假 session，测单次调用超时。"""
+
+    async def call_tool(self, name: str, arguments: dict) -> _FakeCallResult:
+        await asyncio.sleep(5)
+        return _FakeCallResult("不该走到这里")
+
+
+def test_call_timeout_returns_structured_error() -> None:
+    """远程调用超过 mcp_call_timeout 时，应返回 error+fallback 的结构化结果，而非挂起/抛异常。"""
+
+    from config import config
+
+    manager = MCPManager()
+    _run(manager._register_tools("slow", _FakeSlowSession()))
+
+    original = config.mcp_call_timeout
+    object.__setattr__(config, "mcp_call_timeout", 0.05)  # frozen dataclass 的测试专用后门
+    try:
+        result_json = _run(dispatch("mcp__slow__echo", {"text": "x"}))
+    finally:
+        object.__setattr__(config, "mcp_call_timeout", original)
+
+    payload = json.loads(result_json)
+    assert payload.get("fallback") is True
+    assert payload.get("provider") == "mcp"
+    assert "超时" in payload.get("error", ""), payload
 
 
 def main() -> None:

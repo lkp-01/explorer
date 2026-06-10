@@ -43,11 +43,15 @@ class Config:
     # 并发上限（阶段五）：多方案/复杂请求会并发触发多次地点搜索，限流避免触顶日调用额度。
     tencent_max_concurrency: int
 
-    # —— MCP 接入（feature/mcp）——
+    # —— MCP 接入（阶段七）——
     # mcp_enabled：总开关。没装 mcp 包、没配 server、或不想用时设 false，agent 退回纯本地工具。
     # mcp_config_path：mcp_servers.json 的路径，里面列出要连接哪些外部 MCP server。
+    # 两个超时是阶段七补的严谨性边界：外部 server 是不受我们控制的子进程，
+    # 不设超时的话，一个卡死的 server 能让启动或某一轮对话永远挂起。
     mcp_enabled: bool
     mcp_config_path: str
+    mcp_connect_timeout: float  # 单个 server 连接+握手+登记工具的总时限（秒）
+    mcp_call_timeout: float     # 单次远程工具调用的时限（秒）
 
     # —— 记忆持久化（第 7 步）——
     session_dir: str
@@ -97,9 +101,12 @@ def load_config() -> Config:
             or DEFAULT_MODEL_NAME
         ),
         eval_temperature=float(os.getenv("EVAL_TEMPERATURE", "0.0")),
-        # MCP 接入（feature/mcp）：默认开启；缺包/缺配置时由 mcp_client 静默跳过，不会报错。
+        # MCP 接入（阶段七）：默认开启；缺包/缺配置时由 mcp_client 静默跳过，不会报错。
         mcp_enabled=os.getenv("MCP_ENABLED", "true").strip().lower() != "false",
         mcp_config_path=os.getenv("MCP_CONFIG_PATH", "mcp_servers.json"),
+        # 连接给 20s（npx/uvx 首次要下包，偏慢）；单次调用给 30s（够慢工具用，又不至于把一轮对话拖死）
+        mcp_connect_timeout=float(os.getenv("MCP_CONNECT_TIMEOUT", "20")),
+        mcp_call_timeout=float(os.getenv("MCP_CALL_TIMEOUT", "30")),
         qweather_api_key=os.getenv("QWEATHER_API_KEY"),
         qweather_api_host=os.getenv("QWEATHER_API_HOST") or DEFAULT_QWEATHER_API_HOST,
         tencent_map_key=os.getenv("TENCENT_MAP_KEY"),

@@ -2,6 +2,6 @@ openai
 httpx
 pydantic>=2
 python-dotenv
-# MCP 官方 Python SDK（feature/mcp）：提供 ClientSession 与 stdio 连接能力。
+# MCP 官方 Python SDK（阶段七）：提供 ClientSession 与 stdio 连接能力。
 # 没装也不影响运行——mcp_client.py 对它做了延迟导入，缺失时自动跳过 MCP，退回本地工具。
 mcp

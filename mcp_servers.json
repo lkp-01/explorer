@@ -2,6 +2,7 @@
   "_说明": "这里列出要接入的外部 MCP server。格式照搬 Claude Desktop / Cursor 的惯例。",
   "_工作方式": "agent 启动时会逐个把这些 server 作为子进程拉起（command + args），用 stdio 通信，然后 list_tools() 拿到它们的工具，桥接进本地工具表。删/加 server 只动这个文件，不碰代码。",
   "_前置条件": "fetch 需要本机有 uvx（来自 uv），filesystem 需要本机有 npx（来自 Node）。没有对应命令时，该 server 会连接失败并被自动跳过，不影响其它 server 和本地工具。",
+  "_可选字段": "每个 server 还支持：env（显式传给子进程的环境变量；子进程默认只拿到 PATH 等最小安全环境，本项目的 API Key 不会泄过去）、allowTools（白名单，配了就只注册名单内的工具）、denyTools（黑名单）。工具名写远程原始名（不带 mcp__ 前缀），写错的名字只会让该工具被跳过并记日志，不会报错。超时由 .env 的 MCP_CONNECT_TIMEOUT / MCP_CALL_TIMEOUT 控制。",
   "mcpServers": {
     "fetch": {
       "command": "uvx",
@@ -9,7 +10,16 @@
     },
     "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./itineraries"]
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./itineraries"],
+      "_为什么配白名单": "filesystem server 还带 move_file / edit_file 等改删类工具，保存行程只需要读写列查这几个。白名单是对外部工具的最小授权：少给的权限随时可以加，多给的权限出了事收不回。",
+      "allowTools": [
+        "read_text_file",
+        "write_file",
+        "list_directory",
+        "search_files",
+        "create_directory",
+        "get_file_info"
+      ]
     }
   }
 }

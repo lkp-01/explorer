@@ -1,4 +1,4 @@
-"""MCP 客户端层（feature/mcp）：把外部 MCP server 的工具桥接进本地工具表。
+"""MCP 客户端层（阶段七）：把外部 MCP server 的工具桥接进本地工具表。
 
 —— 这个文件到底在干嘛（一句话）——
 它就是 MCP 三角色里缺的那个 **Client**：负责"连上别人写好的 MCP server（Server 角色）→
@@ -16,6 +16,15 @@ dispatch() 本来就 await 得了协程（见 registry.dispatch 里的 inspect.i
 没装 mcp 包 / 配置文件不存在 / 某个 server 连不上 / 某次调用抛错——任何一环出问题，
 都只是"少几个工具"，agent 必须照常用本地工具工作。所以本文件到处是 fail-open 兜底，
 且把 `import mcp` 放到真正要连接时才做（延迟导入），让没装包的人也能正常跑整个项目。
+
+—— 阶段七补上的四道严谨性边界（外部 server 是"别人的进程"，必须设防）——
+1. 超时：连接+握手有 connect 超时，单次调用有 call 超时（config 可调）。没有超时，
+   一个卡死的 server 能把启动或一轮对话永远挂起——串行锁还会把后续调用全堵死。
+2. 最小环境：server 子进程只拿到 SDK 的默认安全环境（PATH 等）+ 配置里显式给它的变量，
+   不再继承完整 os.environ——否则本项目的全部 API Key 都泄给了第三方 server。
+3. 工具白/黑名单：mcp_servers.json 里可按 server 配 allowTools / denyTools，
+   不再盲信远程报上来的每一个工具（如 filesystem 的删改类工具）。
+4. 翻页：list_tools 按协议带 cursor 翻页取全，不再只拿第一页。
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ import os
 from contextlib import AsyncExitStack
 from typing import Any
 
+from config import config
 from tools.registry import ToolSpec, register_tool_spec
 
 logger = logging.getLogger(__name__)
@@ -109,11 +119,22 @@ class MCPManager:
 
         for name, cfg in servers.items():
             try:
-                await self._connect_one(
-                    name, cfg, ClientSession, StdioServerParameters, stdio_client
+                # 连接超时（阶段七）：拉子进程 + 握手 + 登记工具，整段限时。
+                # 用 asyncio.timeout 而不是 wait_for——wait_for 会把协程挪进新任务执行，
+                # 而 stdio 连接的 cancel scope 要求"进入"和"关闭"在同一个任务里（见类注释），
+                # asyncio.timeout 在当前任务内原地取消，不破坏这个约束。
+                async with asyncio.timeout(config.mcp_connect_timeout):
+                    await self._connect_one(
+                        name, cfg, ClientSession, StdioServerParameters, stdio_client
+                    )
+            except TimeoutError:
+                logger.warning(
+                    "连接 MCP server 超时（>%.0fs），已跳过：%s",
+                    config.mcp_connect_timeout,
+                    name,
                 )
             except Exception:
-                # 单个 server 连不上（命令不存在、初始化超时等）只记录并跳过，保证其余照常。
+                # 单个 server 连不上（命令不存在、初始化失败等）只记录并跳过，保证其余照常。
                 logger.exception("连接 MCP server 失败，已跳过：%s", name)
 
     async def _connect_one(
@@ -131,13 +152,28 @@ class MCPManager:
             logger.warning("MCP server %s 缺少 command，跳过", name)
             return
 
-        # env：把当前进程环境合并进去，保证子进程能找到 PATH 等（uvx/npx 需要）。
-        # 配置里也可以给某个 server 单独追加环境变量（如它自己的 API Key）。
-        merged_env = {**os.environ, **(cfg.get("env") or {})}
+        # env（阶段七收紧）：server 子进程只该拿到"能跑起来的最小环境 + 配置里显式给它的变量"。
+        # 之前这里合并了完整 os.environ，等于把本项目所有 API Key 都交给第三方 server——
+        # SDK 的 get_default_environment() 只含 PATH/TEMP 等安全变量（uvx/npx 靠它们就够了），
+        # env=None 时 SDK 默认就用它；只有配置里给了额外变量时才需要手动合并。
+        extra_env = cfg.get("env") or {}
+        env: dict[str, str] | None = None
+        if extra_env:
+            try:
+                from mcp.client.stdio import get_default_environment
+
+                env = {**get_default_environment(), **extra_env}
+            except ImportError:
+                # 极老的 SDK 没有这个函数：退回旧行为并明确警告，而不是悄悄泄露。
+                logger.warning(
+                    "当前 mcp SDK 过旧，server %s 将继承完整环境变量（建议升级 mcp 包）",
+                    name,
+                )
+                env = {**os.environ, **extra_env}
         params = StdioServerParameters(
             command=command,
             args=cfg.get("args", []),
-            env=merged_env,
+            env=env,
         )
 
         # 进入并"按住"两层异步上下文：stdio 传输 + 会话。交给 _stack 在 close() 时统一关闭。
@@ -149,15 +185,51 @@ class MCPManager:
 
         self.sessions[name] = session
         self._locks.setdefault(name, asyncio.Lock())
-        await self._register_tools(name, session)
+        await self._register_tools(name, session, cfg)
 
-    async def _register_tools(self, server_name: str, session: Any) -> None:
-        """问 server 要工具清单，逐个桥接成 ToolSpec 登记进 TOOL_REGISTRY。"""
+    async def _register_tools(
+        self,
+        server_name: str,
+        session: Any,
+        cfg: dict[str, Any] | None = None,
+    ) -> None:
+        """问 server 要工具清单，过滤后逐个桥接成 ToolSpec 登记进 TOOL_REGISTRY。
+
+        过滤（阶段七）：cfg 里可配 allowTools（白名单，配了就只放行名单内的）和
+        denyTools（黑名单，名单内的一律不要）。两者都针对远程原始工具名（不带前缀）。
+        白名单是更严谨的默认姿势——名单写错顶多少工具，黑名单写漏则多放行一个。
+        被过滤掉的工具逐个记日志，保证"少了工具"可见、可排查，而不是悄悄消失。
+        """
 
         self._locks.setdefault(server_name, asyncio.Lock())
 
-        listed = await session.list_tools()
-        for tool in listed.tools:
+        cfg = cfg or {}
+        allow = cfg.get("allowTools")
+        deny = set(cfg.get("denyTools") or [])
+
+        # 翻页（阶段七）：list_tools 按 MCP 协议可能分页（nextCursor），循环取全。
+        # 假如 server 不分页（绝大多数），第一轮 nextCursor 为空，循环只走一次。
+        tools: list[Any] = []
+        cursor: str | None = None
+        while True:
+            listed = (
+                await session.list_tools(cursor=cursor)
+                if cursor
+                else await session.list_tools()
+            )
+            tools.extend(listed.tools)
+            cursor = getattr(listed, "nextCursor", None)
+            if not cursor:
+                break
+
+        for tool in tools:
+            if allow is not None and tool.name not in allow:
+                logger.info("MCP 工具不在 allowTools 白名单，跳过：%s/%s", server_name, tool.name)
+                continue
+            if tool.name in deny:
+                logger.info("MCP 工具命中 denyTools 黑名单，跳过：%s/%s", server_name, tool.name)
+                continue
+
             # 命名空间防撞名：统一加 mcp__<server>__<tool> 前缀（学 Claude 的做法）。
             # 这样即便某个 server 有个叫 search 的工具，也不会和本地工具冲突，来源还一眼可辨。
             full_name = f"mcp__{server_name}__{tool.name}"
@@ -192,8 +264,21 @@ class MCPManager:
             # 串行锁：一个 ClientSession 不保证并发安全，而阶段五的并行框架会让多个子任务
             # 同时 dispatch、可能并发打到同一个 server。用锁把同一 session 的调用串起来，
             # 思路和 places.py 里的 _TENCENT_GATE 信号量一致——保护下游、避免串包。
-            async with lock:
-                result = await session.call_tool(remote_name, kwargs)
+            try:
+                async with lock:
+                    # 调用超时（阶段七）：只给"真正在等远程"的时间设限，排队等锁不算——
+                    # 否则前一个慢调用会让排队者无辜超时。超时放在锁内还有个关键作用：
+                    # 把卡死的调用掐掉、释放锁，该 server 的后续调用才不会被堵死。
+                    async with asyncio.timeout(config.mcp_call_timeout):
+                        result = await session.call_tool(remote_name, kwargs)
+            except TimeoutError:
+                return {
+                    "error": (
+                        f"MCP 工具调用超时（>{config.mcp_call_timeout:.0f}s）：{remote_name}"
+                    ),
+                    "fallback": True,
+                    "provider": "mcp",
+                }
 
             text = _extract_text(result)
 

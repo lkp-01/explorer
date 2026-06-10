@@ -55,7 +55,7 @@ async def main() -> None:
     store = SessionStore(config.session_dir)
     pref_store = PreferenceStore(config.preference_dir)
 
-    # —— 接入 MCP（feature/mcp）：把 mcp_servers.json 里的外部 server 工具桥接进本地工具表 ——
+    # —— 接入 MCP（阶段七）：把 mcp_servers.json 里的外部 server 工具桥接进本地工具表 ——
     # 在进入对话循环之前连接，让模型从第一轮起就能看到 MCP 工具。整段是 fail-open：
     # 关了开关 / 没装包 / 连不上，都只是少几个工具，agent 照常用本地工具工作。
     mcp_manager = MCPManager()

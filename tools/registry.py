@@ -45,7 +45,7 @@ def register_tool(
 
 
 def register_tool_spec(spec: ToolSpec) -> bool:
-    """直接登记一个已经构造好的 ToolSpec（feature/mcp）。
+    """直接登记一个已经构造好的 ToolSpec（阶段七）。
 
     与 register_tool 装饰器的区别：
     - register_tool 用于"写代码时就知道工具长什么样"的本地工具（天气/地点/地址解析）；
